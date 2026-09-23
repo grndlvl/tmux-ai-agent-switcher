@@ -65,10 +65,9 @@ Each entry is `process_name:display_name`. Find the process name with
 ## Optional: live status via Herdr
 
 The picker can additionally show a live `working` / `idle` / `blocked` /
-`unknown` status per pane, using Herdr — a separate, not-yet-public
-agent-state detector — as an external dependency. This is entirely
-optional — the switcher works with no status column at all if Herdr isn't
-installed.
+`unknown` status per pane, using [Herdr](https://herdr.dev/) as an external
+agent-state detector. This is entirely optional — the switcher works with no
+status column at all if Herdr isn't installed.
 
 Status mode requires `herdr`, `jq`, and `timeout` on `PATH`:
 
