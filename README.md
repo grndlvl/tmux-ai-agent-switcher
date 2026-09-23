@@ -1,4 +1,4 @@
-# tmux-ai-sessions
+# tmux-ai-agent-switcher
 
 List and switch between AI coding agent sessions (Claude Code, Codex, opencode,
 Gemini, and any agent you add) running in `tmux`, from a single popup picker.
@@ -10,8 +10,8 @@ status, or search by pane/window/directory text.
 ## Install
 
 ```sh
-git clone https://github.com/grndlvl/tmux-ai-sessions.git
-cd tmux-ai-sessions
+git clone https://github.com/grndlvl/tmux-ai-agent-switcher.git
+cd tmux-ai-agent-switcher
 ./bin/ai-coding-sessions --install
 ```
 
