@@ -89,6 +89,17 @@ Adding new agents:
 
   Example — adding aider:
     AGENTS+=( "aider:aider" )
+
+Pane label:
+  The PANE/LABEL column defaults to session:window.pane (tmux's native
+  target syntax). Override it with a tmux format string (see FORMATS in
+  `man tmux`), either by editing PANE_LABEL_FORMAT at the top of this
+  script or via an environment variable:
+
+    AI_CODING_SESSIONS_LABEL_FORMAT='#{window_name}' ai-coding-sessions
+
+  This only changes what's displayed — pane selection and switching always
+  address panes by session:window.pane internally, so any format is safe.
 HELP
   exit 0
 fi
@@ -136,6 +147,16 @@ AGENTS=(
 )
 # -----------------------------
 
+# --- Configure the pane label here ---
+# Uses tmux format syntax (see FORMATS in `man tmux`). This only changes how
+# panes are displayed in the PANE/TARGET column — selecting and switching
+# panes always uses session:window.pane addressing internally, so any format
+# is safe here. Override without editing this file:
+#   AI_CODING_SESSIONS_LABEL_FORMAT='#{window_name}' ai-coding-sessions
+DEFAULT_PANE_LABEL_FORMAT='#{session_name}:#{window_index}.#{pane_index}'
+PANE_LABEL_FORMAT="${AI_CODING_SESSIONS_LABEL_FORMAT:-$DEFAULT_PANE_LABEL_FORMAT}"
+# --------------------------------------
+
 status_available=true
 for dependency in herdr jq timeout; do
   if ! command -v "$dependency" >/dev/null 2>&1; then
@@ -162,13 +183,13 @@ for entry in "${AGENTS[@]}"; do
   ps_pattern="${ps_pattern:+$ps_pattern|}^${proc}$"
 done
 
-# Single tmux call: grab pane pid, target, window name, AND cwd
+# Single tmux call: grab pane pid, target, window name, cwd, AND label
 declare -A pane_map pane_cwd pane_ids
-while IFS='|' read -r target pid wname cwd pane_id; do
-  pane_map[$pid]="$target|$wname"
+while IFS='|' read -r target pid wname cwd pane_id label; do
+  pane_map[$pid]="$target|$wname|$label"
   pane_cwd[$pid]="$cwd"
   pane_ids[$target]="$pane_id"
-done < <(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{window_name}|#{pane_current_path}|#{pane_id}')
+done < <(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{window_name}|#{pane_current_path}|#{pane_id}|${PANE_LABEL_FORMAT}")
 
 # Single ps call: grab ALL pid->ppid mappings + identify AI processes
 declare -A ppid_map
@@ -199,9 +220,9 @@ done
 mapfile -t panes < <(
   for pid in "${!found[@]}"; do
     agent="${found[$pid]}"
-    IFS='|' read -r target wname <<< "${pane_map[$pid]}"
+    IFS='|' read -r target wname label <<< "${pane_map[$pid]}"
     dir=$(basename "${pane_cwd[$pid]}" 2>/dev/null || echo "?")
-    echo "$target|$wname|$dir|$agent"
+    echo "$target|$label|$wname|$dir|$agent"
   done | sort
 )
 
@@ -252,24 +273,24 @@ matches_filters() {
 if [[ "$SHOW_STATUS" == true ]]; then
   status_rows=()
   for entry in "${panes[@]}"; do
-    IFS='|' read -r target wname dir agent <<< "$entry"
+    IFS='|' read -r target label wname dir agent <<< "$entry"
     pane_id="${pane_ids[$target]}"
     detection=$(explain_pane_status "$pane_id" "$agent")
     status=$(jq -r '.status' <<< "$detection")
     matches_filters "$entry" "$status" || continue
-    status_rows+=("$(jq -cn --arg pane "$pane_id" --arg target "$target" \
+    status_rows+=("$(jq -cn --arg pane "$pane_id" --arg target "$target" --arg label "$label" \
       --arg agent "$agent" --arg window "$wname" --arg dir "$dir" \
       --argjson detection "$detection" \
-      '{pane: $pane, target: $target, agent: $agent, window: $window, dir: $dir} + $detection')")
+      '{pane: $pane, target: $target, label: $label, agent: $agent, window: $window, dir: $dir} + $detection')")
   done
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     printf '%s\n' "${status_rows[@]}" | jq -s '.'
   else
-    printf '%-6s %-24s %-10s %-9s %s\n' "PANE" "TARGET" "AGENT" "STATUS" "EVIDENCE"
+    printf '%-6s %-24s %-10s %-9s %s\n' "PANE" "LABEL" "AGENT" "STATUS" "EVIDENCE"
     for row in "${status_rows[@]}"; do
-      IFS=$'\t' read -r pane_id target agent status reason < <(jq -r '[.pane, .target, .agent, .status, (.matched_rule.id // .reason)] | @tsv' <<< "$row")
-      printf '%-6s %-24s %-10s %-9s %s\n' "$pane_id" "$target" "$agent" "$status" "$reason"
+      IFS=$'\t' read -r pane_id label agent status reason < <(jq -r '[.pane, .label, .agent, .status, (.matched_rule.id // .reason)] | @tsv' <<< "$row")
+      printf '%-6s %-24s %-10s %-9s %s\n' "$pane_id" "$label" "$agent" "$status" "$reason"
     done
   fi
   exit 0
@@ -349,7 +370,7 @@ current=""
 total=${#panes[@]}
 pane_statuses=()
 for entry in "${panes[@]}"; do
-  IFS='|' read -r target _wname _dir agent <<< "$entry"
+  IFS='|' read -r target _label _wname _dir agent <<< "$entry"
   status=unknown
   if [[ "$status_available" == true ]]; then
     detection=$(explain_pane_status "${pane_ids[$target]}" "$agent")
@@ -486,11 +507,11 @@ while true; do
   (( last > max )) && last=$max
   for ((row_index=first; row_index<last; row_index++)); do
     i=${visible_indices[$row_index]}
-    IFS='|' read -r target wname dir agent <<< "${panes[$i]}"
+    IFS='|' read -r target label wname dir agent <<< "${panes[$i]}"
     status=${pane_statuses[$i]}
     marker=" "
     [[ "$target" == "$current" ]] && marker="*"
-    printf ' %s%*d) %s %s ' "$marker" "$number_width" "$((row_index+1))" "$(format_cell "$target" "$pane_width")" "$(format_cell "$agent" "$agent_width")"
+    printf ' %s%*d) %s %s ' "$marker" "$number_width" "$((row_index+1))" "$(format_cell "$label" "$pane_width")" "$(format_cell "$agent" "$agent_width")"
     status_color "$status"
     printf '%-*s' "$status_width" "$status"
     status_color reset
@@ -574,7 +595,7 @@ done
 
 if [[ "$choice" =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= max )); then
   selected_index=${visible_indices[$((10#$choice-1))]}
-  IFS='|' read -r target wname _dir _agent <<< "${panes[$selected_index]}"
+  IFS='|' read -r target _label wname _dir _agent <<< "${panes[$selected_index]}"
   session="${target%%:*}"
   if [[ "$STANDALONE" == false && -n "$TMUX" ]]; then
     tmux switch-client -t "$target" 2>/dev/null || tmux select-window -t "$target" 2>/dev/null

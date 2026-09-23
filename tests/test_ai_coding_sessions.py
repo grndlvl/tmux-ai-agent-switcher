@@ -37,7 +37,8 @@ STUB = textwrap.dedent("""\
                 target = os.environ.get("TEST_TARGET", "sample:" + str(i) + ".0")
                 window = os.environ.get("TEST_WINDOW", "sample")
                 directory = os.environ.get("TEST_DIR", "/tmp/project")
-                print(f"{target}|{100+i}|{window}|{directory}|%{5+i}")
+                label = os.environ.get("TEST_LABEL", target)
+                print(f"{target}|{100+i}|{window}|{directory}|%{5+i}|{label}")
         elif sys.argv[1] == "capture-pane":
             if os.environ.get("TEST_CAPTURE_FAIL"):
                 sys.exit(1)
@@ -112,7 +113,26 @@ class StatusPOCTest(unittest.TestCase):
                 self.assertEqual(row["status"], state)
                 self.assertEqual(row["pane"], "%5")
                 self.assertEqual(row["target"], "sample:0.0")
+                self.assertEqual(row["label"], "sample:0.0")
                 self.assertEqual(row["manifest_version"], "test-version")
+
+    def test_label_defaults_to_session_window_pane_but_is_independent_of_target(self):
+        row = self.status(TEST_LABEL="custom-label")
+        self.assertEqual(row["target"], "sample:0.0")
+        self.assertEqual(row["label"], "custom-label")
+
+    def test_custom_label_format_is_passed_to_tmux_list_panes(self):
+        result = self.run_script("--json", AI_CODING_SESSIONS_LABEL_FORMAT="#{window_name}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        list_panes_call = next(call for call in calls if call[0] == "list-panes")
+        self.assertEqual(list_panes_call[-1].rsplit("|", 1)[-1], "#{window_name}")
+
+    def test_picker_displays_custom_label_instead_of_target(self):
+        result = self.run_script(TEST_LABEL="my-custom-label", TMUX="test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("my-custom-label", result.stdout)
+        self.assertNotIn("sample:0.0", result.stdout)
 
     def test_idle_fallback_preserves_herdr_state_and_evidence(self):
         row = self.status(TEST_DETECTION=json.dumps({

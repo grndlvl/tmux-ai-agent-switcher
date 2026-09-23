@@ -62,6 +62,21 @@ AGENTS=(
 Each entry is `process_name:display_name`. Find the process name with
 `ps -eo pid=,comm= | grep <agent-name>` while the agent is running in a pane.
 
+### Pane label
+
+The PANE column defaults to tmux's native `session:window.pane` target
+syntax. Override it with any [tmux format string](https://man7.org/linux/man-pages/man1/tmux.1.html#FORMATS)
+— for example, to show just the window name:
+
+```sh
+AI_CODING_SESSIONS_LABEL_FORMAT='#{window_name}' ai-coding-sessions
+```
+
+or edit `PANE_LABEL_FORMAT` at the top of `bin/ai-coding-sessions` to change
+the default. This only changes what's displayed — pane selection and
+switching always address panes by `session:window.pane` internally, so any
+format string is safe here.
+
 ## Optional: live status via Herdr
 
 The picker can additionally show a live `working` / `idle` / `blocked` /
