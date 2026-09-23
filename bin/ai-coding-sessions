@@ -1,0 +1,595 @@
+#!/usr/bin/env bash
+# List all active AI coding sessions in tmux and switch to one
+
+STANDALONE=false
+SHOW_STATUS=false
+JSON_OUTPUT=false
+status_filter=all
+text_filter=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --standalone) STANDALONE=true ;;
+    --status) SHOW_STATUS=true ;;
+    --json) SHOW_STATUS=true; JSON_OUTPUT=true ;;
+    --filter)
+      if [[ $# -lt 2 ]]; then
+        printf '%s\n' '--filter requires a status.' >&2
+        exit 2
+      fi
+      status_filter="$2"
+      shift
+      ;;
+    --filter=*) status_filter="${1#*=}" ;;
+    --search)
+      if [[ $# -lt 2 ]]; then
+        printf '%s\n' '--search requires text.' >&2
+        exit 2
+      fi
+      text_filter="$2"
+      shift
+      ;;
+    --search=*) text_filter="${1#*=}" ;;
+    --help|-h|--install) break ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+status_filter=${status_filter,,}
+case "$status_filter" in
+  all|working|blocked|idle|unknown) ;;
+  *) printf 'Unknown status filter: %s\n' "$status_filter" >&2; exit 2 ;;
+esac
+
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+  cat <<'HELP'
+ai-coding-sessions — list and switch between AI coding agent sessions in tmux
+
+Usage: ai-coding-sessions [--standalone | --status | --json] [--filter STATUS] [--search TEXT]
+       ai-coding-sessions [--help | --install]
+
+Options:
+  --help, -h       Show this help
+  --install        Add tmux keybinding (prefix + a) to tmux.conf
+  --standalone     Switch an attached tmux client from outside tmux
+  --status         Print a one-shot status table using Herdr (experimental)
+  --json           Print the same status snapshot as a JSON array
+  --filter STATUS  Show all, working, blocked, idle, or unknown sessions
+  --search TEXT    Match pane, agent, window, directory, or status text
+
+Status POC:
+  Requires installed herdr, jq, and timeout; no Herdr server or hooks needed.
+  The session picker shows status when these tools are available.
+  Use i/b/w/u/a for idle/blocked/working/unknown/all statuses.
+  Use f then s for text search, c to clear filters, r to refresh, and n/p for pages.
+  Reads the live screen of each detected tmux pane without saving its contents.
+  Reports Herdr's state directly; evidence identifies unmatched idle fallbacks.
+  Capture and detector failures report unknown.
+  This snapshot does not track unseen completions (done).
+
+Tmux setup:
+  Run `ai-coding-sessions --install` to automatically add the keybinding,
+  or manually add this line to your tmux.conf:
+
+    bind-key a display-popup -E -w 90% -h 80% "ai-coding-sessions"
+
+  Then reload: tmux source-file ~/.config/tmux/tmux.conf
+
+Adding new agents:
+  Edit the AGENTS array at the top of this script.
+  Format: "process_name:display_name"
+
+  - process_name: value from `ps -eo comm=` when the agent runs
+  - display_name: label shown in the AGENT column
+  - Multiple process names can share a display name
+
+  Finding the process name:
+    1. Start the agent in a tmux pane
+    2. Run: ps -eo pid=,comm= | grep <agent-name>
+    3. Use the comm column value
+
+  Example — adding aider:
+    AGENTS+=( "aider:aider" )
+HELP
+  exit 0
+fi
+
+if [[ "$1" == "--install" ]]; then
+  script_path="$(realpath "$0")"
+  binding="bind-key a display-popup -E -w 90% -h 80% \"$script_path\""
+
+  # Find tmux.conf
+  for conf in ~/.config/tmux/tmux.conf ~/.tmux.conf; do
+    [[ -f "$conf" ]] && tmux_conf="$conf" && break
+  done
+
+  if [[ -z "$tmux_conf" ]]; then
+    echo "No tmux.conf found. Create one at ~/.config/tmux/tmux.conf or ~/.tmux.conf"
+    exit 1
+  fi
+
+  if grep -qF 'ai-coding-sessions' "$tmux_conf" 2>/dev/null; then
+    echo "Already installed in $tmux_conf"
+  else
+    printf '\n# AI coding session switcher\n%s\n' "$binding" >> "$tmux_conf"
+    echo "Added keybinding to $tmux_conf"
+  fi
+
+  # Reload if tmux is running
+  if tmux info &>/dev/null; then
+    tmux source-file "$tmux_conf"
+    echo "Reloaded tmux config. Press prefix + a to use."
+  else
+    echo "Restart tmux or run: tmux source-file $tmux_conf"
+  fi
+  exit 0
+fi
+
+# --- Configure agents here ---
+# Format: "process_name:display_name" (one per line)
+# process_name = what shows in `ps`, display_name = what you see in the list
+AGENTS=(
+  "claude:claude"
+  "claude-code:claude"
+  "codex:codex"
+  "opencode:opencode"
+  "npm exec @googl:gemini"
+)
+# -----------------------------
+
+status_available=true
+for dependency in herdr jq timeout; do
+  if ! command -v "$dependency" >/dev/null 2>&1; then
+    status_available=false
+    if [[ "$SHOW_STATUS" == true ]]; then
+      printf 'Status POC requires %s. The normal switcher works without it.\n' "$dependency" >&2
+      exit 1
+    fi
+    break
+  fi
+done
+
+if ! tmux info &>/dev/null; then
+  echo "tmux is not running." >&2
+  exit 1
+fi
+
+# Build lookup from config
+declare -A comm_to_agent
+ps_pattern=""
+for entry in "${AGENTS[@]}"; do
+  IFS=':' read -r proc name <<< "$entry"
+  comm_to_agent[$proc]="$name"
+  ps_pattern="${ps_pattern:+$ps_pattern|}^${proc}$"
+done
+
+# Single tmux call: grab pane pid, target, window name, AND cwd
+declare -A pane_map pane_cwd pane_ids
+while IFS='|' read -r target pid wname cwd pane_id; do
+  pane_map[$pid]="$target|$wname"
+  pane_cwd[$pid]="$cwd"
+  pane_ids[$target]="$pane_id"
+done < <(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{window_name}|#{pane_current_path}|#{pane_id}')
+
+# Single ps call: grab ALL pid->ppid mappings + identify AI processes
+declare -A ppid_map
+declare -a ai_entries=()
+while read -r pid ppid comm; do
+  ppid_map[$pid]=$ppid
+  [[ -n "${comm_to_agent[$comm]}" ]] && ai_entries+=("$pid $comm")
+done < <(ps -eo pid=,ppid=,comm= 2>/dev/null)
+
+# Walk parent chains in-memory (zero subprocess calls)
+declare -A found
+for entry in "${ai_entries[@]}"; do
+  read -r apid comm <<< "$entry"
+  agent="${comm_to_agent[$comm]}"
+  p=$apid
+  depth=0
+  while [[ -n "$p" && "$p" -gt 1 && $depth -lt 30 ]]; do
+    if [[ -n "${pane_map[$p]}" && -z "${found[$p]}" ]]; then
+      found[$p]="$agent"
+      break
+    fi
+    p="${ppid_map[$p]}"
+    ((depth++))
+  done
+done
+
+# Build final list (no subprocess calls — cwd already cached)
+mapfile -t panes < <(
+  for pid in "${!found[@]}"; do
+    agent="${found[$pid]}"
+    IFS='|' read -r target wname <<< "${pane_map[$pid]}"
+    dir=$(basename "${pane_cwd[$pid]}" 2>/dev/null || echo "?")
+    echo "$target|$wname|$dir|$agent"
+  done | sort
+)
+
+explain_pane_status() {
+  local pane_id="$1" agent="$2" snapshot explanation normalized
+
+  if ! snapshot=$(timeout 2s tmux capture-pane -p -t "$pane_id" 2>/dev/null); then
+    printf '%s\n' '{"status":"unknown","reason":"capture_failed"}'
+    return
+  fi
+  if [[ -z "${snapshot//[[:space:]]/}" ]]; then
+    printf '%s\n' '{"status":"unknown","reason":"empty_screen"}'
+    return
+  fi
+  if ! explanation=$(timeout 3s herdr agent explain --file /dev/stdin --agent "$agent" --json <<< "$snapshot" 2>/dev/null); then
+    printf '%s\n' '{"status":"unknown","reason":"detector_failed"}'
+    return
+  fi
+
+  # Preserve Herdr's result and its evidence without adding detection rules.
+  if normalized=$(jq -cse '
+    if length != 1 then error("expected one detector result") else .[0] end |
+    if type != "object" or (.state | IN("idle", "working", "blocked", "unknown") | not) then
+      error("invalid detector output")
+    else
+      {
+        status: .state,
+        detected_status: .state,
+        reason: (.fallback_reason // (if .skip_state_update or .screen_detection_skipped then "detection_skipped" elif .matched_rule != null then "matched_rule" else "no_matching_rule" end)),
+        matched_rule: .matched_rule,
+        manifest_source: .manifest_source,
+        manifest_version: .manifest_version
+      }
+    end
+  ' <<< "$explanation" 2>/dev/null); then
+    printf '%s\n' "$normalized"
+  else
+    printf '%s\n' '{"status":"unknown","reason":"invalid_detector_output"}'
+  fi
+}
+
+matches_filters() {
+  local entry="$1" status="$2" text="$1 $2"
+  [[ "$status_filter" == all || "$status" == "$status_filter" ]] &&
+    [[ "${text,,}" == *"${text_filter,,}"* ]]
+}
+
+if [[ "$SHOW_STATUS" == true ]]; then
+  status_rows=()
+  for entry in "${panes[@]}"; do
+    IFS='|' read -r target wname dir agent <<< "$entry"
+    pane_id="${pane_ids[$target]}"
+    detection=$(explain_pane_status "$pane_id" "$agent")
+    status=$(jq -r '.status' <<< "$detection")
+    matches_filters "$entry" "$status" || continue
+    status_rows+=("$(jq -cn --arg pane "$pane_id" --arg target "$target" \
+      --arg agent "$agent" --arg window "$wname" --arg dir "$dir" \
+      --argjson detection "$detection" \
+      '{pane: $pane, target: $target, agent: $agent, window: $window, dir: $dir} + $detection')")
+  done
+
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    printf '%s\n' "${status_rows[@]}" | jq -s '.'
+  else
+    printf '%-6s %-24s %-10s %-9s %s\n' "PANE" "TARGET" "AGENT" "STATUS" "EVIDENCE"
+    for row in "${status_rows[@]}"; do
+      IFS=$'\t' read -r pane_id target agent status reason < <(jq -r '[.pane, .target, .agent, .status, (.matched_rule.id // .reason)] | @tsv' <<< "$row")
+      printf '%-6s %-24s %-10s %-9s %s\n' "$pane_id" "$target" "$agent" "$status" "$reason"
+    done
+  fi
+  exit 0
+fi
+
+if [[ ${#panes[@]} -eq 0 ]]; then
+  echo "No active AI sessions found."
+  exit 0
+fi
+
+format_cell() {
+  local value="$1" width="$2" cells controls=$'[\001-\037\177]'
+  value=${value//$controls/}
+  cells=$(printf '%s' "$value" | wc -L)
+  if (( cells > width )); then
+    value=${value:0:$((width - 1))}
+    cells=$(printf '%s' "$value" | wc -L)
+    while (( cells >= width )); do
+      value=${value%?}
+      cells=$(printf '%s' "$value" | wc -L)
+    done
+    value+='…'
+    ((cells++))
+  fi
+  printf '%s%*s' "$value" "$((width - cells))" ''
+}
+
+select_standalone_client_tty() {
+  local target_session="$1"
+  local current_tty client_tty client_session client_activity
+  local fallback_tty fallback_activity session_tty session_activity
+
+  current_tty=$(tty 2>/dev/null || true)
+
+  while IFS='|' read -r client_tty client_session client_activity; do
+    [[ -z "$client_tty" ]] && continue
+
+    if [[ "$client_tty" == "$current_tty" ]]; then
+      echo "$client_tty"
+      return 0
+    fi
+
+    if [[ "$client_session" == "$target_session" && ( -z "$session_tty" || "$client_activity" -gt "$session_activity" ) ]]; then
+      session_tty="$client_tty"
+      session_activity="$client_activity"
+    fi
+
+    if [[ -z "$fallback_tty" || "$client_activity" -gt "$fallback_activity" ]]; then
+      fallback_tty="$client_tty"
+      fallback_activity="$client_activity"
+    fi
+  done < <(tmux list-clients -F '#{client_tty}|#{client_session}|#{client_activity}' 2>/dev/null)
+
+  [[ -n "$session_tty" ]] && echo "$session_tty" && return 0
+  [[ -n "$fallback_tty" ]] && echo "$fallback_tty"
+}
+
+focus_hyprland_terminal() {
+  local title="$1" address
+
+  command -v hyprctl >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  address=$(
+    hyprctl clients -j 2>/dev/null \
+      | jq -r --arg title "$title" '.[] | select((.class | test("ghostty"; "i")) and .title == $title) | .address' 2>/dev/null \
+      | head -n1
+  )
+
+  [[ -n "$address" && "$address" != "null" ]] && hyprctl dispatch focuswindow "address:$address" >/dev/null 2>&1
+}
+
+# Detect current pane (only works inside tmux)
+current=""
+[[ -n "$TMUX" ]] && current=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null)
+
+total=${#panes[@]}
+pane_statuses=()
+for entry in "${panes[@]}"; do
+  IFS='|' read -r target _wname _dir agent <<< "$entry"
+  status=unknown
+  if [[ "$status_available" == true ]]; then
+    detection=$(explain_pane_status "${pane_ids[$target]}" "$agent")
+    status=$(jq -r '.status' <<< "$detection")
+  fi
+  pane_statuses+=("$status")
+done
+
+interactive=false
+resize_pending=false
+if [[ -t 0 && -t 1 ]]; then
+  interactive=true
+  printf '\033[?1049h'
+  trap 'printf "\033[?1049l"' EXIT
+  trap 'resize_pending=true' WINCH
+fi
+page=0
+
+update_picker_layout() {
+  visible_indices=()
+  for i in "${!panes[@]}"; do
+    if matches_filters "${panes[$i]}" "${pane_statuses[$i]}"; then
+      visible_indices+=("$i")
+    fi
+  done
+  max=${#visible_indices[@]}
+  number_width=${#max}
+  (( number_width < 2 )) && number_width=2
+  columns=${COLUMNS:-90}
+  rows=${LINES:-24}
+  if [[ "$interactive" == true ]]; then
+    read -r rows columns < <(stty size 2>/dev/null)
+  fi
+  [[ "$columns" =~ ^[0-9]+$ && "$columns" -gt 0 ]] || columns=90
+  [[ "$rows" =~ ^[0-9]+$ && "$rows" -gt 0 ]] || rows=24
+  (( columns >= 36 && rows >= 9 )) || return 1
+  pane_width=$((columns / 4))
+  (( pane_width < 22 )) && pane_width=22
+  (( pane_width > 40 )) && pane_width=40
+  agent_width=8
+  status_width=7
+  window_width=0
+  (( columns < 50 )) && pane_width=$((columns - number_width - 4 - agent_width - status_width - 2))
+  dir_width=$((columns - number_width - 4 - pane_width - agent_width - status_width - 3))
+  if (( columns >= 90 )); then
+    window_width=$(((dir_width - 1) / 2))
+    dir_width=$((dir_width - window_width - 1))
+  fi
+  page_size=$((rows - 8))
+  [[ -n "$text_filter" ]] && ((page_size--))
+  (( page_size < 1 )) && page_size=1
+  pages=$(((max + page_size - 1) / page_size))
+  (( pages < 1 )) && pages=1
+  (( page >= pages )) && page=$((pages - 1))
+  return 0
+}
+
+status_color() {
+  [[ -t 1 && ! -v NO_COLOR && "${TERM:-dumb}" != dumb ]] || return 0
+  case "$1" in
+    working) printf '\033[33m' ;;
+    blocked) printf '\033[1;31m' ;;
+    idle) printf '\033[32m' ;;
+    unknown) printf '\033[90m' ;;
+    reset) printf '\033[0m' ;;
+  esac
+}
+
+read_picker_key() {
+  local read_status
+  while true; do
+    if read -rsn1 -t 0.25 choice; then
+      return 0
+    else
+      read_status=$?
+    fi
+    [[ "$resize_pending" == true ]] && return 1
+    (( read_status > 128 )) || return 1
+  done
+}
+
+read_filter_choice() {
+  while true; do
+    resize_pending=false
+    if update_picker_layout; then
+      [[ "$interactive" == true ]] && printf '\033[H\033[2J'
+      printf 'Filter\n\n'
+      printf 'i idle     b blocked    w working\n'
+      printf 'u unknown  a all statuses\n'
+      printf 's search   c clear filters\n\n'
+      printf 'Choose filter (Esc back, q quit): '
+    else
+      [[ "$interactive" == true ]] && printf '\033[H\033[2J'
+      format_cell 'Resize to at least 36x9' "$columns"
+    fi
+    if read_picker_key; then return 0; fi
+    [[ "$resize_pending" == true ]] || return 1
+  done
+}
+
+while true; do
+  resize_pending=false
+  if ! update_picker_layout; then
+    [[ "$interactive" == true ]] && printf '\033[H\033[2J'
+    format_cell 'Resize to at least 36x9' "$columns"
+    [[ "$resize_pending" == true ]] && continue
+    if ! read_picker_key; then
+      [[ "$resize_pending" == true ]] && continue
+      exit 0
+    fi
+    [[ "$choice" == q || "$choice" == Q ]] && exit 0
+    continue
+  fi
+  [[ "$interactive" == true ]] && printf '\033[H\033[2J'
+  printf -v heading 'AI sessions (%d) | Page %d/%d' "$max" "$((page + 1))" "$pages"
+  format_cell "$heading" "$columns"
+  printf '\n'
+  format_cell "Filter: $status_filter | f menu ($max/$total)" "$columns"
+  printf '\n'
+  if [[ -n "$text_filter" ]]; then
+    format_cell "Search: $text_filter" "$columns"
+    printf '\n'
+  fi
+  printf '\n'
+  printf '%*s%-*s %-*s %-*s' "$((number_width + 4))" '' "$pane_width" "PANE" "$agent_width" "AGENT" "$status_width" "STATUS"
+  (( window_width > 0 )) && printf ' %-*s' "$window_width" "WINDOW"
+  (( dir_width > 0 )) && printf ' %-*s' "$dir_width" "DIR"
+  printf '\n'
+  printf -v separator '%*s' "$columns" ''
+  printf '%s\n' "${separator// /-}"
+
+  first=$((page * page_size))
+  last=$((first + page_size))
+  (( last > max )) && last=$max
+  for ((row_index=first; row_index<last; row_index++)); do
+    i=${visible_indices[$row_index]}
+    IFS='|' read -r target wname dir agent <<< "${panes[$i]}"
+    status=${pane_statuses[$i]}
+    marker=" "
+    [[ "$target" == "$current" ]] && marker="*"
+    printf ' %s%*d) %s %s ' "$marker" "$number_width" "$((row_index+1))" "$(format_cell "$target" "$pane_width")" "$(format_cell "$agent" "$agent_width")"
+    status_color "$status"
+    printf '%-*s' "$status_width" "$status"
+    status_color reset
+    (( window_width > 0 )) && printf ' %s' "$(format_cell "${wname#🤖 }" "$window_width")"
+    (( dir_width > 0 )) && printf ' %s' "$(format_cell "$dir" "$dir_width")"
+    printf '\n'
+  done
+  if (( max == 0 )); then
+    if [[ -n "$text_filter" ]]; then
+      format_cell 'No matching sessions.' "$columns"
+    else
+      format_cell "No $status_filter sessions." "$columns"
+    fi
+    printf '\n'
+  fi
+
+  if (( max == 0 )); then
+    printf '\nf menu | r refresh | q quit: '
+  elif (( columns >= 65 )); then
+    printf '\nSelect (1-%d), f menu, r refresh' "$max"
+    (( pages > 1 )) && printf ', n/p page'
+    printf ', q quit: '
+  else
+    printf '\n1-%d | f menu | r' "$max"
+    (( pages > 1 )) && printf ' | n/p'
+    printf ' | q: '
+  fi
+  [[ "$resize_pending" == true ]] && continue
+  if ! read_picker_key; then
+    [[ "$resize_pending" == true ]] && continue
+    exit 0
+  fi
+  if [[ "$choice" == f || "$choice" == F ]]; then
+    read_filter_choice || exit 0
+    [[ "$choice" =~ ^[ibwuascqIBWUASCQ]$ ]] || continue
+  fi
+  [[ "$choice" == "q" || "$choice" == "Q" || -z "$choice" ]] && exit 0
+  case "$choice" in
+    i|I|b|B|w|W|u|U|a|A)
+      case "${choice,,}" in
+        i) status_filter=idle ;;
+        b) status_filter=blocked ;;
+        w) status_filter=working ;;
+        u) status_filter=unknown ;;
+        a) status_filter=all ;;
+      esac
+      page=0
+      continue
+      ;;
+    s|S)
+      [[ "$interactive" == true ]] && printf '\033[H\033[2J'
+      printf 'Text search\n\nSearch (empty clears): '
+      if read -r -e -i "$text_filter" next_search; then
+        text_filter="$next_search"
+        page=0
+      fi
+      continue
+      ;;
+    c|C) status_filter=all; text_filter=""; page=0; continue ;;
+    $'\033') continue ;;
+    r|R)
+      [[ "$interactive" == true ]] && printf '\033[?1049l'
+      refresh_args=(--filter "$status_filter" --search "$text_filter")
+      [[ "$STANDALONE" == true ]] && refresh_args+=(--standalone)
+      exec "$0" "${refresh_args[@]}"
+      ;;
+    n|N) (( page + 1 < pages )) && ((page++)); continue ;;
+    p|P) (( page > 0 )) && ((page--)); continue ;;
+  esac
+  (( max == 0 )) && continue
+  if [[ "$choice" =~ ^[0-9]$ ]]; then
+    while (( ${#choice} < ${#max} )) && read -rsn1 -t 0.5 digit; do
+      [[ "$digit" =~ ^[0-9]$ ]] || break
+      choice+="$digit"
+    done
+  fi
+  [[ "$resize_pending" == true ]] && continue
+  printf '%s\n' "$choice"
+  break
+done
+
+if [[ "$choice" =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= max )); then
+  selected_index=${visible_indices[$((10#$choice-1))]}
+  IFS='|' read -r target wname _dir _agent <<< "${panes[$selected_index]}"
+  session="${target%%:*}"
+  if [[ "$STANDALONE" == false && -n "$TMUX" ]]; then
+    tmux switch-client -t "$target" 2>/dev/null || tmux select-window -t "$target" 2>/dev/null
+    tmux select-pane -t "$target" 2>/dev/null
+  else
+    # Prefer the invoking terminal, then an attached client for the selected session.
+    client_tty=$(select_standalone_client_tty "$session")
+    if [[ -n "$client_tty" ]]; then
+      tmux switch-client -c "$client_tty" -t "$session" 2>/dev/null
+      tmux select-window -t "$target" 2>/dev/null
+      tmux select-pane -t "$target" 2>/dev/null
+      focus_hyprland_terminal "$session:$wname"
+    fi
+  fi
+else
+  echo "Invalid selection."
+  exit 1
+fi
