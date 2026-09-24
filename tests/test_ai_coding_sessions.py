@@ -431,6 +431,49 @@ class StatusPOCTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("tmux is not running", result.stderr)
 
+    def fake_home(self, name):
+        home = self.root / name
+        (home / ".config" / "tmux").mkdir(parents=True)
+        (home / ".config" / "tmux" / "tmux.conf").touch()
+        return home
+
+    def test_install_default_adds_a_popup_binding(self):
+        home = self.fake_home("home-popup")
+        result = self.run_script("--install", HOME=str(home))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        conf_text = (home / ".config" / "tmux" / "tmux.conf").read_text()
+        self.assertIn(f'bind-key a display-popup -E -w 90% -h 80% "{SCRIPT}"', conf_text)
+
+    def test_install_pane_adds_a_split_window_binding(self):
+        home = self.fake_home("home-pane")
+        result = self.run_script("--install", "pane", HOME=str(home))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        conf_text = (home / ".config" / "tmux" / "tmux.conf").read_text()
+        self.assertIn(f'bind-key A split-window -c "#{{pane_current_path}}" "{SCRIPT}"', conf_text)
+
+    def test_install_is_idempotent_per_key(self):
+        home = self.fake_home("home-idempotent")
+        conf = home / ".config" / "tmux" / "tmux.conf"
+        self.run_script("--install", HOME=str(home))
+        result = self.run_script("--install", HOME=str(home))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already exists", result.stdout)
+        self.assertEqual(conf.read_text().count("bind-key a "), 1)
+
+    def test_install_popup_and_pane_coexist_on_different_keys(self):
+        home = self.fake_home("home-both")
+        conf = home / ".config" / "tmux" / "tmux.conf"
+        self.run_script("--install", HOME=str(home))
+        self.run_script("--install", "pane", HOME=str(home))
+        text = conf.read_text()
+        self.assertIn("bind-key a ", text)
+        self.assertIn("bind-key A ", text)
+
+    def test_install_rejects_an_unknown_style(self):
+        result = self.run_script("--install", "bogus")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unknown install style", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

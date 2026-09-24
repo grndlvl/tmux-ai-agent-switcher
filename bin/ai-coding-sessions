@@ -45,11 +45,13 @@ if [[ "$1" == "--help" || "$1" == "-h" ]]; then
 ai-coding-sessions — list and switch between AI coding agent sessions in tmux
 
 Usage: ai-coding-sessions [--standalone | --status | --json] [--filter STATUS] [--search TEXT]
-       ai-coding-sessions [--help | --install]
+       ai-coding-sessions [--help | --install [popup|pane]]
 
 Options:
   --help, -h       Show this help
-  --install        Add tmux keybinding (prefix + a) to tmux.conf
+  --install [STYLE]  Add a tmux keybinding to tmux.conf: "popup" (default,
+                     prefix + a, floating) or "pane" (prefix + A, a regular
+                     split instead of a floating popup)
   --standalone     Switch an attached tmux client from outside tmux
   --status         Print a one-shot status table using Herdr (experimental)
   --json           Print the same status snapshot as a JSON array
@@ -71,10 +73,12 @@ Status POC:
   This snapshot does not track unseen completions (done).
 
 Tmux setup:
-  Run `ai-coding-sessions --install` to automatically add the keybinding,
-  or manually add this line to your tmux.conf:
+  Run `ai-coding-sessions --install` for a floating popup (prefix + a), or
+  `ai-coding-sessions --install pane` for a regular split pane (prefix + A)
+  instead. Or add one of these to your tmux.conf by hand:
 
     bind-key a display-popup -E -w 90% -h 80% "ai-coding-sessions"
+    bind-key A split-window -c "#{pane_current_path}" "ai-coding-sessions"
 
   Then reload: tmux source-file ~/.config/tmux/tmux.conf
 
@@ -109,8 +113,18 @@ HELP
 fi
 
 if [[ "$1" == "--install" ]]; then
+  install_style="${2:-popup}"
+  case "$install_style" in
+    popup) key=a; action='display-popup -E -w 90% -h 80%' ;;
+    pane) key=A; action='split-window -c "#{pane_current_path}"' ;;
+    *)
+      printf 'Unknown install style: %s (use "popup" or "pane")\n' "$install_style" >&2
+      exit 2
+      ;;
+  esac
+
   script_path="$(realpath "$0")"
-  binding="bind-key a display-popup -E -w 90% -h 80% \"$script_path\""
+  binding="bind-key $key $action \"$script_path\""
 
   # Find tmux.conf
   for conf in ~/.config/tmux/tmux.conf ~/.tmux.conf; do
@@ -122,17 +136,17 @@ if [[ "$1" == "--install" ]]; then
     exit 1
   fi
 
-  if grep -qF 'ai-coding-sessions' "$tmux_conf" 2>/dev/null; then
-    echo "Already installed in $tmux_conf"
+  if grep -qF "bind-key $key " "$tmux_conf" 2>/dev/null; then
+    echo "A binding for prefix + $key already exists in $tmux_conf — not overwriting it."
   else
-    printf '\n# AI coding session switcher\n%s\n' "$binding" >> "$tmux_conf"
-    echo "Added keybinding to $tmux_conf"
+    printf '\n# AI coding session switcher (%s)\n%s\n' "$install_style" "$binding" >> "$tmux_conf"
+    echo "Added keybinding (prefix + $key, $install_style) to $tmux_conf"
   fi
 
   # Reload if tmux is running
   if tmux info &>/dev/null; then
     tmux source-file "$tmux_conf"
-    echo "Reloaded tmux config. Press prefix + a to use."
+    echo "Reloaded tmux config. Press prefix + $key to use."
   else
     echo "Restart tmux or run: tmux source-file $tmux_conf"
   fi

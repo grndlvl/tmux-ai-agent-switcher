@@ -16,11 +16,17 @@ cd tmux-ai-agent-switcher
 ```
 
 `--install` adds a `prefix + a` keybinding to `~/.config/tmux/tmux.conf` (or
-`~/.tmux.conf`) that opens the picker in a popup, and reloads tmux if it's
-running. You can also bind it manually:
+`~/.tmux.conf`) that opens the picker in a floating popup, and reloads tmux
+if it's running.
+
+Prefer a regular pane over a floating popup? Run
+`./bin/ai-coding-sessions --install pane` instead (or alongside — they use
+different keys) for a `prefix + A` binding that opens it as a normal split.
+You can also bind either manually:
 
 ```tmux
 bind-key a display-popup -E -w 90% -h 80% "/path/to/bin/ai-coding-sessions"
+bind-key A split-window -c "#{pane_current_path}" "/path/to/bin/ai-coding-sessions"
 ```
 
 Requires `bash` and `tmux`. No other runtime dependencies for the core
