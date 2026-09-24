@@ -44,7 +44,8 @@ picker.
 Open the picker (via the keybinding, or run the script directly), then:
 
 - `1`-`N` — jump to that session
-- `j` / `k` — move the highlighted row down / up, then `Enter` to switch to it
+- `j` / `k` (or the arrow keys) — move the highlighted row down / up, then
+  `Enter` to switch to it; Left/Right arrows page like `p`/`n`
 - `f` — open the filter menu (`i`dle / `b`locked / `w`orking / `u`nknown / `a`ll)
 - `s` — text search across pane, agent, window, and directory
 - `c` — clear all filters

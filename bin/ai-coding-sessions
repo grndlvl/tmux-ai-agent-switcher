@@ -69,7 +69,8 @@ Options:
 
 Navigation:
   Type a number to jump straight to that session, or move the highlighted
-  row with j/k (down/up) and press Enter to switch to it. q quits.
+  row with j/k or the Up/Down arrows and press Enter to switch to it.
+  Left/Right arrows page like p/n. q quits.
 
 Status POC:
   Requires installed herdr, jq, and timeout; no Herdr server or hooks needed.
@@ -483,10 +484,32 @@ row_highlight_off() {
   printf '\033[0m'
 }
 
+pending_key=""
+
 read_picker_key() {
-  local read_status
+  local read_status introducer arrow
   while true; do
+    if [[ -n "$pending_key" ]]; then
+      choice="$pending_key"
+      pending_key=""
+      return 0
+    fi
     if read -rsn1 -t 0.25 choice; then
+      if [[ "$choice" == $'\033' ]] && read -rsn1 -t 0.1 introducer; then
+        if [[ "$introducer" == "[" || "$introducer" == "O" ]]; then
+          if read -rsn1 -t 0.1 arrow; then
+            case "$arrow" in
+              A) choice=k ;;  # Up
+              B) choice=j ;;  # Down
+              C) choice=n ;;  # Right
+              D) choice=p ;;  # Left
+            esac
+          fi
+        else
+          # Not an escape sequence -- queue the byte we peeked at for next time.
+          pending_key="$introducer"
+        fi
+      fi
       return 0
     else
       read_status=$?

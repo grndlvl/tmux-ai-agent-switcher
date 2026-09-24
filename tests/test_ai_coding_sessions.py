@@ -247,6 +247,30 @@ class StatusPOCTest(unittest.TestCase):
         calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
         self.assertIn(["select-pane", "-t", "sample:2.0"], calls)
 
+    def test_down_arrow_moves_cursor_like_j(self):
+        result = self.run_script(input_text="\x1b[B\n", TMUX="test", TEST_PANE_COUNT="3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertIn(["select-pane", "-t", "sample:1.0"], calls)
+
+    def test_up_arrow_does_not_move_above_the_first_row(self):
+        result = self.run_script(input_text="\x1b[A\n", TMUX="test", TEST_PANE_COUNT="3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertIn(["select-pane", "-t", "sample:0.0"], calls)
+
+    def test_left_and_right_arrows_page_like_p_and_n(self):
+        result = self.run_script(input_text="\x1b[C\x1b[Dq", TEST_PANE_COUNT="5", LINES="11", COLUMNS="64", TMUX="test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Page 2/2", result.stdout)
+        self.assertGreaterEqual(result.stdout.count("Page 1/2"), 2)
+
+    def test_lone_escape_key_is_not_mistaken_for_an_arrow(self):
+        result = self.run_script(input_text="\x1bq", TMUX="test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertFalse(any(call[0] == "select-pane" for call in calls))
+
     def test_enter_with_no_matching_sessions_is_a_noop(self):
         result = self.run_script("--filter", "blocked", input_text="\nq")
         self.assertEqual(result.returncode, 0, result.stderr)
