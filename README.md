@@ -21,12 +21,19 @@ if it's running.
 
 Prefer a regular pane over a floating popup? Run
 `./bin/ai-coding-sessions --install pane` instead (or alongside — they use
-different keys) for a `prefix + A` binding that opens it as a normal split.
-You can also bind either manually:
+different keys) for a `prefix + A` binding that opens it as a 40%-wide pane
+on the left. That split (direction and size) is configurable — edit
+`PANE_SPLIT_ARGS` at the top of the script, or override it for one install:
+
+```sh
+AI_CODING_SESSIONS_PANE_SPLIT_ARGS='-v -l 30%' ./bin/ai-coding-sessions --install pane
+```
+
+You can also bind either style manually:
 
 ```tmux
 bind-key a display-popup -E -w 90% -h 80% "/path/to/bin/ai-coding-sessions"
-bind-key A split-window -c "#{pane_current_path}" "/path/to/bin/ai-coding-sessions"
+bind-key A split-window -h -b -l 40% -c "#{pane_current_path}" "/path/to/bin/ai-coding-sessions"
 ```
 
 Requires `bash` and `tmux`. No other runtime dependencies for the core

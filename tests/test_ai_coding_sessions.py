@@ -449,7 +449,16 @@ class StatusPOCTest(unittest.TestCase):
         result = self.run_script("--install", "pane", HOME=str(home))
         self.assertEqual(result.returncode, 0, result.stderr)
         conf_text = (home / ".config" / "tmux" / "tmux.conf").read_text()
-        self.assertIn(f'bind-key A split-window -c "#{{pane_current_path}}" "{SCRIPT}"', conf_text)
+        self.assertIn(f'bind-key A split-window -h -b -l 40% -c "#{{pane_current_path}}" "{SCRIPT}"', conf_text)
+
+    def test_install_pane_split_args_are_configurable(self):
+        home = self.fake_home("home-pane-custom")
+        result = self.run_script(
+            "--install", "pane", HOME=str(home), AI_CODING_SESSIONS_PANE_SPLIT_ARGS="-v -l 30%",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        conf_text = (home / ".config" / "tmux" / "tmux.conf").read_text()
+        self.assertIn(f'bind-key A split-window -v -l 30% -c "#{{pane_current_path}}" "{SCRIPT}"', conf_text)
 
     def test_install_is_idempotent_per_key(self):
         home = self.fake_home("home-idempotent")

@@ -40,6 +40,14 @@ case "$status_filter" in
   *) printf 'Unknown status filter: %s\n' "$status_filter" >&2; exit 2 ;;
 esac
 
+# --- Configure the pane-style install here ---
+# Flags passed to tmux's split-window when running `--install pane`.
+# Default: a 40%-wide pane on the left. Override without editing this file:
+#   AI_CODING_SESSIONS_PANE_SPLIT_ARGS='-v -l 30%' ai-coding-sessions --install pane
+DEFAULT_PANE_SPLIT_ARGS='-h -b -l 40%'
+PANE_SPLIT_ARGS="${AI_CODING_SESSIONS_PANE_SPLIT_ARGS:-$DEFAULT_PANE_SPLIT_ARGS}"
+# ----------------------------------------------
+
 if [[ "$1" == "--help" || "$1" == "-h" ]]; then
   cat <<'HELP'
 ai-coding-sessions — list and switch between AI coding agent sessions in tmux
@@ -50,8 +58,9 @@ Usage: ai-coding-sessions [--standalone | --status | --json] [--filter STATUS] [
 Options:
   --help, -h       Show this help
   --install [STYLE]  Add a tmux keybinding to tmux.conf: "popup" (default,
-                     prefix + a, floating) or "pane" (prefix + A, a regular
-                     split instead of a floating popup)
+                     prefix + a, floating) or "pane" (prefix + A, a 40%-wide
+                     pane on the left instead of a floating popup; split
+                     direction/size configurable, see Tmux setup below)
   --standalone     Switch an attached tmux client from outside tmux
   --status         Print a one-shot status table using Herdr (experimental)
   --json           Print the same status snapshot as a JSON array
@@ -74,11 +83,17 @@ Status POC:
 
 Tmux setup:
   Run `ai-coding-sessions --install` for a floating popup (prefix + a), or
-  `ai-coding-sessions --install pane` for a regular split pane (prefix + A)
+  `ai-coding-sessions --install pane` for a regular pane (prefix + A)
   instead. Or add one of these to your tmux.conf by hand:
 
     bind-key a display-popup -E -w 90% -h 80% "ai-coding-sessions"
-    bind-key A split-window -c "#{pane_current_path}" "ai-coding-sessions"
+    bind-key A split-window -h -b -l 40% -c "#{pane_current_path}" "ai-coding-sessions"
+
+  The pane split defaults to a 40%-wide pane on the left. Change the
+  default by editing PANE_SPLIT_ARGS at the top of this script, or override
+  it just for one install:
+
+    AI_CODING_SESSIONS_PANE_SPLIT_ARGS='-v -l 30%' ai-coding-sessions --install pane
 
   Then reload: tmux source-file ~/.config/tmux/tmux.conf
 
@@ -116,7 +131,7 @@ if [[ "$1" == "--install" ]]; then
   install_style="${2:-popup}"
   case "$install_style" in
     popup) key=a; action='display-popup -E -w 90% -h 80%' ;;
-    pane) key=A; action='split-window -c "#{pane_current_path}"' ;;
+    pane) key=A; action="split-window $PANE_SPLIT_ARGS -c \"#{pane_current_path}\"" ;;
     *)
       printf 'Unknown install style: %s (use "popup" or "pane")\n' "$install_style" >&2
       exit 2
