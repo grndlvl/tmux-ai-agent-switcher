@@ -216,6 +216,44 @@ class StatusPOCTest(unittest.TestCase):
         calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
         self.assertIn(["select-pane", "-t", "sample:3.0"], calls)
 
+    def test_enter_alone_selects_the_highlighted_first_row(self):
+        result = self.run_script(input_text="\n", TMUX="test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertIn(["select-pane", "-t", "sample:0.0"], calls)
+
+    def test_j_moves_cursor_down_before_enter_selects(self):
+        result = self.run_script(input_text="j\n", TMUX="test", TEST_PANE_COUNT="3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertIn(["select-pane", "-t", "sample:1.0"], calls)
+
+    def test_k_does_not_move_above_the_first_row(self):
+        result = self.run_script(input_text="k\n", TMUX="test", TEST_PANE_COUNT="3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertIn(["select-pane", "-t", "sample:0.0"], calls)
+
+    def test_j_crosses_into_the_next_page(self):
+        result = self.run_script(input_text="jjj\n", TEST_PANE_COUNT="5", LINES="11", COLUMNS="64", TMUX="test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Page 2/2", result.stdout)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertIn(["select-pane", "-t", "sample:3.0"], calls)
+
+    def test_k_crosses_back_into_the_previous_page(self):
+        result = self.run_script(input_text="jjjk\n", TEST_PANE_COUNT="5", LINES="11", COLUMNS="64", TMUX="test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertIn(["select-pane", "-t", "sample:2.0"], calls)
+
+    def test_enter_with_no_matching_sessions_is_a_noop(self):
+        result = self.run_script("--filter", "blocked", input_text="\nq")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No blocked sessions.", result.stdout)
+        calls = [json.loads(line) for line in self.tmux_log.read_text().splitlines()]
+        self.assertFalse(any(call[0] == "select-pane" for call in calls))
+
     def test_picker_fits_narrow_and_wide_terminals(self):
         for width in (40, 64, 100, 200):
             with self.subTest(width=width):

@@ -56,6 +56,10 @@ Options:
   --filter STATUS  Show all, working, blocked, idle, or unknown sessions
   --search TEXT    Match pane, agent, window, directory, or status text
 
+Navigation:
+  Type a number to jump straight to that session, or move the highlighted
+  row with j/k (down/up) and press Enter to switch to it. q quits.
+
 Status POC:
   Requires installed herdr, jq, and timeout; no Herdr server or hooks needed.
   The session picker shows status when these tools are available.
@@ -388,6 +392,7 @@ if [[ -t 0 && -t 1 ]]; then
   trap 'resize_pending=true' WINCH
 fi
 page=0
+cursor=0
 
 update_picker_layout() {
   visible_indices=()
@@ -437,6 +442,16 @@ status_color() {
     unknown) printf '\033[90m' ;;
     reset) printf '\033[0m' ;;
   esac
+}
+
+row_highlight_on() {
+  [[ -t 1 && ! -v NO_COLOR && "${TERM:-dumb}" != dumb ]] || return 0
+  printf '\033[7m'
+}
+
+row_highlight_off() {
+  [[ -t 1 && ! -v NO_COLOR && "${TERM:-dumb}" != dumb ]] || return 0
+  printf '\033[0m'
 }
 
 read_picker_key() {
@@ -505,18 +520,26 @@ while true; do
   first=$((page * page_size))
   last=$((first + page_size))
   (( last > max )) && last=$max
+  page_rows=$((last - first))
+  (( cursor >= page_rows )) && cursor=$((page_rows > 0 ? page_rows - 1 : 0))
+  (( cursor < 0 )) && cursor=0
   for ((row_index=first; row_index<last; row_index++)); do
     i=${visible_indices[$row_index]}
     IFS='|' read -r target label wname dir agent <<< "${panes[$i]}"
     status=${pane_statuses[$i]}
     marker=" "
     [[ "$target" == "$current" ]] && marker="*"
+    is_cursor=false
+    (( row_index - first == cursor )) && is_cursor=true
+    [[ "$is_cursor" == true ]] && row_highlight_on
     printf ' %s%*d) %s %s ' "$marker" "$number_width" "$((row_index+1))" "$(format_cell "$label" "$pane_width")" "$(format_cell "$agent" "$agent_width")"
     status_color "$status"
     printf '%-*s' "$status_width" "$status"
     status_color reset
+    [[ "$is_cursor" == true ]] && row_highlight_on
     (( window_width > 0 )) && printf ' %s' "$(format_cell "${wname#🤖 }" "$window_width")"
     (( dir_width > 0 )) && printf ' %s' "$(format_cell "$dir" "$dir_width")"
+    [[ "$is_cursor" == true ]] && row_highlight_off
     printf '\n'
   done
   if (( max == 0 )); then
@@ -531,11 +554,12 @@ while true; do
   if (( max == 0 )); then
     printf '\nf menu | r refresh | q quit: '
   elif (( columns >= 65 )); then
-    printf '\nSelect (1-%d), f menu, r refresh' "$max"
+    printf '\nSelect (1-%d), j/k move, Enter select, f menu, r refresh' "$max"
     (( pages > 1 )) && printf ', n/p page'
     printf ', q quit: '
   else
     printf '\n1-%d | f menu | r' "$max"
+    printf ' | j/k | Enter'
     (( pages > 1 )) && printf ' | n/p'
     printf ' | q: '
   fi
@@ -548,8 +572,30 @@ while true; do
     read_filter_choice || exit 0
     [[ "$choice" =~ ^[ibwuascqIBWUASCQ]$ ]] || continue
   fi
-  [[ "$choice" == "q" || "$choice" == "Q" || -z "$choice" ]] && exit 0
+  [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
+  enter_selected=false
+  if [[ -z "$choice" ]]; then
+    (( max == 0 )) && continue
+    choice="$((first + cursor + 1))"
+    enter_selected=true
+  fi
   case "$choice" in
+    j|J)
+      ((cursor++))
+      if (( cursor >= page_rows )); then
+        if (( page + 1 < pages )); then ((page++)); cursor=0
+        else cursor=$((page_rows > 0 ? page_rows - 1 : 0)); fi
+      fi
+      continue
+      ;;
+    k|K)
+      ((cursor--))
+      if (( cursor < 0 )); then
+        if (( page > 0 )); then ((page--)); cursor=$((page_size - 1))
+        else cursor=0; fi
+      fi
+      continue
+      ;;
     i|I|b|B|w|W|u|U|a|A)
       case "${choice,,}" in
         i) status_filter=idle ;;
@@ -559,6 +605,7 @@ while true; do
         a) status_filter=all ;;
       esac
       page=0
+      cursor=0
       continue
       ;;
     s|S)
@@ -567,10 +614,11 @@ while true; do
       if read -r -e -i "$text_filter" next_search; then
         text_filter="$next_search"
         page=0
+        cursor=0
       fi
       continue
       ;;
-    c|C) status_filter=all; text_filter=""; page=0; continue ;;
+    c|C) status_filter=all; text_filter=""; page=0; cursor=0; continue ;;
     $'\033') continue ;;
     r|R)
       [[ "$interactive" == true ]] && printf '\033[?1049l'
@@ -578,11 +626,11 @@ while true; do
       [[ "$STANDALONE" == true ]] && refresh_args+=(--standalone)
       exec "$0" "${refresh_args[@]}"
       ;;
-    n|N) (( page + 1 < pages )) && ((page++)); continue ;;
-    p|P) (( page > 0 )) && ((page--)); continue ;;
+    n|N) (( page + 1 < pages )) && ((page++)); cursor=0; continue ;;
+    p|P) (( page > 0 )) && ((page--)); cursor=0; continue ;;
   esac
   (( max == 0 )) && continue
-  if [[ "$choice" =~ ^[0-9]$ ]]; then
+  if [[ "$enter_selected" != true && "$choice" =~ ^[0-9]$ ]]; then
     while (( ${#choice} < ${#max} )) && read -rsn1 -t 0.5 digit; do
       [[ "$digit" =~ ^[0-9]$ ]] || break
       choice+="$digit"
